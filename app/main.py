@@ -43,7 +43,20 @@ async def get_config():
     """Return configuration (Stripe keys etc)."""
     return {
         "stripe_key": os.environ.get("STRIPE_PUBLISHABLE_KEY", ""),
-        "stripe_enabled": bool(os.environ.get("STRIPE_SECRET_KEY", "")),
+        "stripe_secret_configured": bool(os.environ.get("STRIPE_SECRET_KEY", "")),
+        "stripe_enabled": bool(os.environ.get("STRIPE_SECRET_KEY", "") and os.environ.get("STRIPE_PUBLISHABLE_KEY", "")),
+    }
+
+@app.get("/pricing")
+async def get_pricing():
+    """Return pricing plans."""
+    return {
+        "plans": [
+            {"id": "free", "name": "Free", "price_cents": 0, "interval": "monthly", "features": ["Basic dashboard", "3 subscriptions", "Email support"]},
+            {"id": "starter", "name": "Starter", "price_cents": 999, "interval": "monthly", "features": ["Up to 20 subscriptions", "Revenue analytics", "Transaction history", "Priority support"]},
+            {"id": "pro", "name": "Pro", "price_cents": 2900, "interval": "monthly", "features": ["Unlimited subscriptions", "Advanced analytics", "Multi-gateway support", "API access", "Priority support"]},
+            {"id": "enterprise", "name": "Enterprise", "price_cents": 9900, "interval": "monthly", "features": ["Everything in Pro", "Custom integrations", "Dedicated support", "SLA guarantee", "White-label options"]},
+        ]
     }
 
 
@@ -344,7 +357,7 @@ async def dashboard():
 
 
 # Stripe checkout endpoint
-@app.post("/checkout")
+@app.get("/checkout")
 async def create_checkout(request: Request):
     """Create a Stripe checkout session for subscription purchase."""
     body = await request.json()
@@ -355,35 +368,9 @@ async def create_checkout(request: Request):
     currency = body.get("currency", "usd")
     
     stripe_secret = os.environ.get("STRIPE_SECRET_KEY", "")
+    stripe_pub = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
     
-    if stripe_secret:
-        try:
-            import stripe
-            stripe.api_key = stripe_secret
-            
-            session = stripe.checkout.Session.create(
-                payment_method_types=["card"],
-                mode="subscription",
-                line_items=[{
-                    "price_data": {
-                        "currency": currency,
-                        "product_data": {
-                            "name": f"MRR Tracker - {plan.title()} Plan",
-                            "description": f"${amount_cents/100:.2f}/{'month' if interval == 'monthly' else 'year'}",
-                        },
-                        "unit_amount": amount_cents,
-                        "recurring": {"interval": interval},
-                    },
-                    "quantity": 1,
-                }],
-                customer_email=customer_email,
-                success_url=f"{request.base_url}success?session_id={{CHECKOUT_SESSION_ID}}",
-                cancel_url=f"{request.base_url}cancel",
-            )
-            return {"session_id": session.id, "url": session.url, "mode": "live"}
-        except Exception as e:
-            return {"error": str(e), "mode": "live"}
-    else:
+    if not stripe_secret or not stripe_pub:
         # Simulated checkout (no Stripe configured)
         return {
             "mode": "simulated",
@@ -392,6 +379,45 @@ async def create_checkout(request: Request):
             "amount": amount_cents,
             "customer_email": customer_email,
         }
+    
+    try:
+        import stripe
+        stripe.api_key = stripe_secret
+        
+        # Map our interval names to Stripe's
+        stripe_interval = interval
+        if interval == "monthly":
+            stripe_interval = "month"
+        elif interval == "yearly":
+            stripe_interval = "year"
+        
+        plan_names = {"free": "Free", "starter": "Starter", "pro": "Pro", "enterprise": "Enterprise"}
+        display_name = plan_names.get(plan, plan.title())
+        
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            mode="subscription",
+            line_items=[{
+                "price_data": {
+                    "currency": currency,
+                    "product_data": {
+                        "name": f"MRR Tracker - {display_name} Plan",
+                        "description": f"${amount_cents/100:.2f}/{'month' if stripe_interval == 'month' else 'year'}",
+                    },
+                    "unit_amount": amount_cents,
+                    "recurring": {"interval": stripe_interval},
+                },
+                "quantity": 1,
+            }],
+            customer_email=customer_email,
+            success_url=f"{request.base_url}success?session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{request.base_url}cancel",
+        )
+        return {"session_id": session.id, "url": session.url, "mode": "live"}
+    except stripe.error.StripeError as e:
+        return {"error": str(e), "mode": "live", "stripe_code": e.user_code if hasattr(e, 'user_code') else None}
+    except Exception as e:
+        return {"error": f"Server error: {str(e)}", "mode": "live"}
 
 
 @app.get("/success")
