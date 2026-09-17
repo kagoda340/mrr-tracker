@@ -1,0 +1,7 @@
+applications:
+- name: mrr-tracker
+  memory: 256M
+  instances: 1
+  path: .
+  buildpack: python_buildpack
+  command: gunicorn app.main:app --bind 0.0.0.0:$PORT
